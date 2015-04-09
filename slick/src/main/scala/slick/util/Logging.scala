@@ -1,11 +1,10 @@
 package slick.util
 
-import org.slf4j.{ Logger => Slf4jLogger, LoggerFactory }
+import org.slf4j.{Logger => Slf4jLogger, LoggerFactory}
 
 final class SlickLogger(val slf4jLogger: Slf4jLogger) {
   @inline
-  def debug(msg: => String, n: => Dumpable): Unit =
-    debug(msg+"\n"+TreeDump.get(n, prefix = DumpInfo.highlight(if(GlobalConfig.unicodeDump) "\u2503 " else "| ")))
+  def debug(msg: => String, n: => Dumpable): Unit = debug(msg+"\n"+SlickLogger.treePrinter.get(n))
 
   @inline
   def isDebugEnabled = slf4jLogger.isDebugEnabled()
@@ -39,6 +38,11 @@ final class SlickLogger(val slf4jLogger: Slf4jLogger) {
 
   @inline
   def trace(msg: => String, t: Throwable) { if (slf4jLogger.isTraceEnabled) slf4jLogger.trace(msg, t) }
+}
+
+object SlickLogger {
+  private val treePrinter =
+    new TreePrinter(prefix = DumpInfo.highlight(if(GlobalConfig.unicodeDump) "\u2503 " else "| "))
 }
 
 trait Logging {
