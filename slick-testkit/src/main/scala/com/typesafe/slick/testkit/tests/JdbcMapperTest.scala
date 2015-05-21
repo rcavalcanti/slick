@@ -1,9 +1,11 @@
 package com.typesafe.slick.testkit.tests
 
+import scala.language.higherKinds
+import scala.reflect.ClassTag
+
 import org.junit.Assert._
 
 import com.typesafe.slick.testkit.util.{JdbcTestDB, AsyncTest}
-import scala.reflect.ClassTag
 
 class JdbcMapperTest extends AsyncTest[JdbcTestDB] {
   import tdb.profile.api._
@@ -316,13 +318,38 @@ class JdbcMapperTest extends AsyncTest[JdbcTestDB] {
       .sortBy { case _ :: _ :: ss :: HNil => ss }
       .map { case id :: b :: ss :: HNil => id :: ss :: (42 :: HNil) :: HNil }
 
+    class Updator[E] {
+      private[this] var values: HList = HNil
+      private[this] var sh: List[Shape[_, _, _, _]] = Nil
+      private[this] var pr: E => HList = (_ => HNil)
+      def += [T : BaseColumnType](v: T, f: E => Rep[T]): Unit = {
+        val oldpr = pr
+        pr = (b => f(b) :: oldpr(b))
+        sh = implicitly[Shape[FlatShapeLevel, Rep[T], T, Rep[T]]] :: sh
+        values = v :: values
+      }
+      def apply[C[_]](q: Query[E, _, C]): DBIO[Int] =
+        q.map(pr)(new HList.HListShape[FlatShapeLevel, HList, HList, HList](sh)).update(values)
+    }
+
+    def update(id: Int, bo: Option[Boolean], so: Option[String]): DBIO[Int] = {
+      val u = new Updator[B]
+      if(bo.isDefined) u += (bo.get, _.b)
+      if(so.isDefined) u += (so.get, _.s)
+      u(bs.filter(_.id === id))
+    }
+
     seq(
       bs.schema.create,
       bs += (1 :: true :: "a" :: HNil),
       bs += (2 :: false :: "c" :: HNil),
       bs += (3 :: false :: "b" :: HNil),
       q1.result.map(_ shouldBe Vector(3 :: "bb" :: (42 :: HNil) :: HNil, 2 :: "cc" :: (42 :: HNil) :: HNil)),
-      q1.result.map(_ shouldBe Vector(3 :: "bb" :: (42 :: HNil) :: HNil, 2 :: "cc" :: (42 :: HNil) :: HNil))
+      q1.result.map(_ shouldBe Vector(3 :: "bb" :: (42 :: HNil) :: HNil, 2 :: "cc" :: (42 :: HNil) :: HNil)),
+      update(1, None, Some("x")),
+      bs.to[Set].result.map(_ shouldBe Set((1 :: true :: "x" :: HNil), (2 :: false :: "c" :: HNil), (3 :: false :: "b" :: HNil))),
+      update(1, Some(false), None),
+      bs.to[Set].result.map(_ shouldBe Set((1 :: false :: "x" :: HNil), (2 :: false :: "c" :: HNil), (3 :: false :: "b" :: HNil)))
     )
   }
 
