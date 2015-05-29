@@ -466,6 +466,26 @@ final case class Bind(generator: Symbol, from: Node, select: Node) extends Binar
   }
 }
 
+/** An aggregation function application which is similar to a Bind(_, _, Pure(_)) where the
+  * projection contains a mapping function application. The return type is an aggregated
+  * scalar value though, not a collection. */
+final case class Aggregate(sym: Symbol, from: Node, select: Node) extends BinaryNode with DefNode {
+  type Self = Aggregate
+  def left = from
+  def right = select
+  override def nodeChildNames = Seq("from "+sym, "select")
+  protected[this] def nodeRebuild(left: Node, right: Node) = copy(from = left, select = right)
+  def nodeGenerators = Seq((sym, from))
+  override def getDumpInfo = super.getDumpInfo.copy(mainInfo = "")
+  protected[this] def nodeRebuildWithGenerators(gen: IndexedSeq[Symbol]) = copy(sym = gen(0))
+  def nodeWithComputedType2(scope: SymbolScope, typeChildren: Boolean, retype: Boolean): Self = {
+    val from2 :@ CollectionType(_, el) = from.nodeWithComputedType(scope, typeChildren, retype)
+    val select2 = select.nodeWithComputedType(scope + (sym -> el), typeChildren, retype)
+    nodeRebuildOrThis(Vector(from2, select2))
+      .nodeTypedOrCopy(if(!nodeHasType || retype) select2.nodeType else nodeType)
+  }
+}
+
 /** A table together with its expansion into columns. */
 final case class TableExpansion(generator: Symbol, table: Node, columns: Node) extends BinaryNode with DefNode {
   type Self = TableExpansion

@@ -99,6 +99,7 @@ object QueryCompiler {
     Phase.expandRecords,
     Phase.flattenProjections,
     // Optimize for SQL
+    Phase.createAggregates,
     Phase.rewriteJoins,
     Phase.verifySymbols,
     // Combine with client-side mapping and retype
@@ -148,6 +149,7 @@ object Phase {
   val expandConditionals = new ExpandConditionals
   val expandRecords = new ExpandRecords
   val flattenProjections = new FlattenProjections
+  val createAggregates = new CreateAggregates
   val rewriteJoins = new RewriteJoins
   val verifySymbols = new VerifySymbols
   val resolveZipJoins = new ResolveZipJoins

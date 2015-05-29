@@ -88,34 +88,20 @@ class MergeToComprehensions extends Phase {
         logger.debug("Merging GroupBy into Comprehension:", Ellipsis(n, List(0, 0)))
         val b2 = applyReplacements(b1, replacements1, c1)
         val str2 = str1.replace {
-          case Bind(_, FwdPath(s :: ElementSymbol(2) :: Nil), Pure(v, _)) if s == s1 =>
-            applyReplacements(v, replacements1, c1)
-          case FwdPath(s :: ElementSymbol(2) :: Nil) if s == s1 =>
-            val Some(Pure(all, _)) = c1.select
-            all
+          case Aggregate(_, FwdPath(s :: ElementSymbol(2) :: Nil), v) if s == s1 =>
+            applyReplacements(v, replacements1, c1).replace {
+              case Apply(f: AggregateFunctionSymbol, Seq(ch)) :@ tpe =>
+                Apply(f, Seq(ch match {
+                  case StructNode(Seq(ch, _*)) => ch._2
+                  case n => n
+                }))(tpe)
+            }
           case FwdPath(s :: ElementSymbol(1) :: rest) if s == s1 =>
             rest.foldLeft(b2) { case (n, s) => n.select(s) }.nodeWithComputedType()
         }
-        logger.debug("Flattened GroupBy result:", str2)
-        val str3 = str2.replace {
-          case Apply(Library.CountAll, Seq(ch)) :@ tpe =>
-            Library.Count.typed(tpe, ch match {
-              case StructNode(Seq(ch)) => ch._2
-              case ProductNode(Seq(ch)) => ch
-              case StructNode(ch) => singleNominalTypePath(ch.map(_._2)).getOrElse(LiteralNode(1))
-              case ProductNode(ch) => singleNominalTypePath(ch).getOrElse(LiteralNode(1))
-              case n => n
-            })
-          case Apply(f: AggregateFunctionSymbol, Seq(ch)) :@ tpe =>
-            Apply(f, Seq(ch match {
-              case StructNode(Seq(ch)) => ch._2
-              case ProductNode(Seq(ch)) => ch
-              case n => n
-            }))(tpe)
-        }
-        val c2 = c1.copy(groupBy = Some(b2), select = Some(Pure(str3, ts2))).nodeWithComputedType()
+        val c2 = c1.copy(groupBy = Some(b2), select = Some(Pure(str2, ts2))).nodeWithComputedType()
         logger.debug("Merged GroupBy into Comprehension:", c2)
-        val StructNode(defs2) = str3
+        val StructNode(defs2) = str2
         val replacements = defs2.map { case (f, _) => (ts2, f) -> f }.toMap
         logger.debug("Replacements are: "+replacements)
         (c2, replacements)
@@ -215,14 +201,6 @@ class MergeToComprehensions extends Phase {
 
       case n =>
         val (c, rep) = mergeTakeDrop(n, false)
-        /*val repWithoutIdentityRefs = rep.filter {
-          case ((_, s1), s2) if s1 == s2 => false
-          case _ => true
-        }
-        if(!repWithoutIdentityRefs.isEmpty)
-          throw new SlickException("Unexpected non-empty replacements: "+repWithoutIdentityRefs)
-        val Some(Pure(StructNode(defs), ts)) = c.select
-        val mappings = defs.map { case (f, _) => ((ts, f), f :: Nil) }*/
         val mappings = rep.mapValues(_ :: Nil).toSeq
         logger.debug("Mappings are: "+mappings)
         (c, mappings)
@@ -231,10 +209,15 @@ class MergeToComprehensions extends Phase {
     def convert1(n: Node): Node = n match {
       case n :@ Type.Structural(CollectionType(cons, el)) =>
         convertOnlyInScalar(createTopLevel(n)._1)
-      case Apply(sym: AggregateFunctionSymbol, Seq(ch :@ CollectionType(_, _))) =>
-        val ch2 = convert1(ch)
-        aggregationToSubquery(sym, n.nodeType, ch2)
-        //throw new SlickTreeException("Stray aggregation remaining", n)
+      case a: Aggregate =>
+        logger.debug("Merging Aggregate into Comprehension:", Ellipsis(a, List(0)))
+        val (c1, rep) = mergeFilterWhere(a.from, true)
+        val sel2 = applyReplacements(a.select, rep, c1)
+        val c2 = c1.copy(select = Some(Pure(sel2))).nodeWithComputedType()
+        val c3 = convertOnlyInScalar(c2)
+        val res = Library.SilentCast.typed(a.nodeType, c3)
+        logger.debug("Merged Aggregate into Comprehension as:", res)
+        res
       case n =>
         n.nodeMapChildren(convert1, keepType = true)
     }
@@ -246,26 +229,6 @@ class MergeToComprehensions extends Phase {
     }
 
     convert1(tree)
-  }
-
-  /** Convert an aggregation of a query (i.e. Union or Comprehension) to an aggregating
-    * Comprehension. */
-  def aggregationToSubquery(sym: AggregateFunctionSymbol, tpe: Type, query: Node): Node = {
-    val c = query match {
-      case c @ Comprehension(_, _, Some(Pure(StructNode(defs), ts1)), _, None, Seq(), Seq(), None, None) =>
-        c.copy(select = Some(Pure(defs.head._2, ts1))).nodeWithComputedType()
-      case n =>
-        val s = new AnonSymbol
-        val StructType(tpes) = n.nodeType.asCollectionType.elementType.structural
-        Comprehension(s, query, Some(Pure(Select(Ref(s), tpes.head._1)))).nodeWithComputedType()
-    }
-    val Some(Pure(v, ts1)) = c.select
-    val agg = sym match {
-      case Library.CountAll => Apply(Library.Count, Seq(LiteralNode(1)))(tpe)
-      case sym => Apply(sym, Seq(v))(tpe)
-    }
-    val c2 = c.copy(select = Some(Pure(agg, ts1))).nodeWithComputedType()
-    Apply(Library.SilentCast, Seq(c2))(tpe)
   }
 
   /** Merge the common operations Bind, Filter and CollectionBase into an existing Comprehension.
@@ -336,23 +299,6 @@ class MergeToComprehensions extends Phase {
         case None => n
       }
     }, bottomUp = true, keepType = true)
-  }
-
-  /** If there is a path prefix with a NominalType in a number of scalar computations on paths,
-    * return the first path, otherwise return None. */
-  def singleNominalTypePath(ch: Seq[Node]): Option[Node] = {
-    val paths: Seq[List[Symbol]] = ch.collect { case FwdPath(ss) => ss }
-    if(paths.isEmpty) None
-    else {
-      val p = paths.reduceLeft[List[Symbol]] { case (p1, p2) =>
-        (p1, p2).zipped.takeWhile(t => t._1 == t._2).map(_._1).toList
-      }
-      if(p.isEmpty) None
-      else ProductNode(ch).findNode {
-        case FwdPath(ss) if ss startsWith p => true
-        case _ => false
-      }
-    }
   }
 
   object FwdPathOnTypeSymbol {

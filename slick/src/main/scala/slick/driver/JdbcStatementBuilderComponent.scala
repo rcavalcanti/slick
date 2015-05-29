@@ -356,6 +356,7 @@ trait JdbcStatementBuilderComponent { driver: JdbcDriver =>
       case s: SimpleExpression => s.toSQL(this)
       case Library.Between(left, start, end) => b"$left between $start and $end"
       case Library.CountDistinct(e) => b"count(distinct $e)"
+      case Library.CountAll(e) => b"count($e)"
       case Library.Like(l, r) => b"\($l like $r\)"
       case Library.Like(l, r, LiteralNode(esc: Char)) =>
         if(esc == '\'' || esc == '%' || esc == '_') throw new SlickException("Illegal escape character '"+esc+"' for LIKE expression")
